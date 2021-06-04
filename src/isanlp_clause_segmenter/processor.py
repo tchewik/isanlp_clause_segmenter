@@ -1,10 +1,88 @@
 import conllu
 import numpy as np
 from isanlp.annotation_rst import DiscourseUnit
-from isanlp.utils.annotation_conll_converter import AnnotationCONLLConverter
 
 from catboost_clf import CatBoostClf
 from feature_extractor import FeatureExtractor
+
+
+class AnnotationCONLLConverter:
+    """Converts isanlp-style annotation to raw CONLL-U format."""
+
+    def __init__(self):
+        self._unifeatures = (
+            'Abbr',
+            'Animacy',
+            'Aspect',
+            'Case',
+            'Clusivity',
+            'Definite',
+            'Degree',
+            'Evident',
+            'Foreign',
+            'Gender',
+            'Mood',
+            'NounClass',
+            'NumType',
+            'Number',
+            'Person',
+            'Polarity',
+            'Polite',
+            'Poss',
+            'PronType',
+            'Reflex',
+            'Tense',
+            'Typo',
+            'VerbForm',
+            'Voice',
+            'Variant')
+
+    def __call__(self, doc_id: str, annotation: dict):
+        assert 'sentences' in annotation.keys()
+        assert 'tokens' in annotation.keys()
+        assert 'lemma' in annotation.keys()
+        assert 'postag' in annotation.keys()
+        assert 'morph' in annotation.keys()
+        assert 'syntax_dep_tree' in annotation.keys()
+
+        _postag_key = 'ud_postag' if 'ud_postag' in annotation.keys() else 'postag'
+
+        yield '# newdoc id = ' + doc_id
+        for j, sentence in enumerate(annotation['sentences']):
+            for i, token_number in enumerate(range(sentence.begin, sentence.end)):
+                parent_number = annotation['syntax_dep_tree'][j][i].parent
+                if parent_number != -1:
+                    parent_number += 1
+
+                yield_string = '\t'.join(list(map(self._prepare_value, [
+                    i + 1,  # ID
+                    annotation['tokens'][token_number].text,  # FORM
+                    annotation['lemma'][j][i],  # LEMMA
+                    annotation['postag'][j][i] if annotation['postag'][j][i] else 'X',  # UPOS
+                    '_',  # XPOS
+                    self._to_universal_features(annotation['morph'][j][i]),  # FEATS
+                    parent_number,  # HEAD
+                    annotation['syntax_dep_tree'][j][i].link_name,  # DEPREL
+                    '_',  # DEPS
+                ])))
+                yield yield_string
+            yield '\n'
+
+    def _prepare_value(self, value):
+        if type(value) == str:
+            return value
+        elif value:
+            return str(value)
+        elif value == 0:
+            return '0'
+        return '_'
+
+    def _to_universal_features(self, morph_annot):
+        if not morph_annot:
+            return None
+
+        return '|'.join([feature + '=' + morph_annot.get(feature)
+                         for feature in self._unifeatures if morph_annot.get(feature)])
 
 
 class Processor:
@@ -13,35 +91,36 @@ class Processor:
         self._conll_converter = AnnotationCONLLConverter()
         self._feature_extractor = FeatureExtractor()
         self._model = CatBoostClf(model_dir_path)
-        print('Initialized.')
 
     def __call__(self, annot_text, annot_tokens, annot_sentences, annot_lemma, annot_morph, annot_postag,
                  annot_syntax_dep_tree):
-        print('received call')
-        annotation = {
+
+        annot = {
             'text': annot_text,
             'tokens': annot_tokens,
             'sentences': annot_sentences,
             'lemma': annot_lemma,
             'morph': annot_morph,
-            'ud_postag': annot_postag,
+            'postag': annot_postag,
             'syntax_dep_tree': annot_syntax_dep_tree
         }
-        print(annotation)
 
         converted_annot = ""
-        for line in self._conll_converter(doc_id='0', annotation=annotation):
+        for line in self._conll_converter(doc_id='0', annotation=annot):
             converted_annot += line + '\n'
 
-        print(converted_annot)
-
         sentences = conllu.parse(converted_annot)
-        print(sentences)
         features = self._feature_extractor(sentences)
-        print(features)
         predictions = np.argwhere(np.array(self._model.predict(features)) == 1)[:, 0]
-        print(predictions)
         return self._build_discourse_units(annot_text, annot_tokens, predictions)
+
+    @staticmethod
+    def _convert_annot(annot):
+        _conll_converter = AnnotationCONLLConverter()
+        converted_annot = ""
+        for line in _conll_converter(doc_id='0', annotation=annot):
+            converted_annot += line + '\n'
+        return converted_annot
 
     def _build_discourse_units(self, text, tokens, numbers):
         """
